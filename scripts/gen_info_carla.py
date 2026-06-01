@@ -95,9 +95,10 @@ def generate_info(nusc, scenes, max_cam_sweeps=6, max_lidar_sweeps=10):
             if 'anns' in cur_sample:
                 for ann in cur_sample['anns']:
                     ann_info = nusc.get('sample_annotation', ann)
-                    # All timestamps are 0 in CARLA -> box_velocity is
-                    # undefined (inf/nan). Zero it out.
-                    ann_info['velocity'] = np.zeros(3)
+                    # CARLA has real 5 Hz timestamps -> box_velocity is valid
+                    # (matches BEVFormer / nuScenes). Keep it (nan -> 0).
+                    ann_info['velocity'] = np.nan_to_num(
+                        nusc.box_velocity(ann_info['token']), nan=0.0)
                     ann_infos.append(ann_info)
                 info['ann_infos'] = ann_infos
             infos.append(info)
