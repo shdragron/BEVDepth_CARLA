@@ -112,8 +112,24 @@ class DetNuscEvaluator():
                 detail['{}/{}'.format(metric_prefix,
                                       self.ErrNameMapping[k])] = val
 
-        detail['{}/NDS'.format(metric_prefix)] = metrics['nd_score']
-        detail['{}/mAP'.format(metric_prefix)] = metrics['mean_ap']
+        # Recompute mAP/NDS over exactly self.class_names using the devkit
+        # formula. For nuScenes (10 classes) this reproduces the devkit numbers;
+        # for CARLA (6 classes) it gives a clean score not diluted by the 4
+        # absent detection_cvpr_2019 classes (which score AP=0). Matches
+        # BEVFormer's CARLA eval. NDS = (5*mAP + sum max(0,1-nanmean(TP)))/10.
+        import numpy as np
+        tp_keys = list(metrics['tp_errors'].keys())
+        mean_dist_aps = [np.mean(list(metrics['label_aps'][c].values()))
+                         for c in self.class_names]
+        mAPc = float(np.mean(mean_dist_aps))
+        tp_scores = [max(0.0, 1.0 - float(np.nanmean(
+            [metrics['label_tp_errors'][c][m] for c in self.class_names])))
+            for m in tp_keys]
+        ndsc = (5.0 * mAPc + float(np.sum(tp_scores))) / (5.0 + len(tp_keys))
+        detail['{}/NDS'.format(metric_prefix)] = ndsc
+        detail['{}/mAP'.format(metric_prefix)] = mAPc
+        detail['{}/NDS_allclass'.format(metric_prefix)] = metrics['nd_score']
+        detail['{}/mAP_allclass'.format(metric_prefix)] = metrics['mean_ap']
         return detail
 
     def format_results(self,

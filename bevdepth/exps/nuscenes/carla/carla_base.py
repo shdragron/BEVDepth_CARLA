@@ -71,6 +71,10 @@ class CarlaBEVDepthBase(BaseBEVDepthLightningModel):
         # Evaluator reads GT from the per-vehicle eval DB.
         self.evaluator.data_root = CARLA_DB_ROOT
         self.evaluator.version = f'v1.0-carla_{veh}_eval'
+        # NDS/mAP are recomputed over exactly these 6 classes inside
+        # DetNuscEvaluator._evaluate_single (over self.class_names), since the
+        # devkit DetectionConfig hard-requires all 10 classes. No config change
+        # needed here; the evaluator already has the 6 CARLA class_names.
         # visibility >= 2 GT filter (matches BEVFormer); CarlaDetDataset applies
         # it via _keep_ann, replacing the default num_lidar_pts+radar>0 filter.
         self.gt_visibility_min = 2
