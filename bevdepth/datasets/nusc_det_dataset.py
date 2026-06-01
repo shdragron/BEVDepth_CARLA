@@ -192,10 +192,13 @@ def map_pointcloud_to_image(
     coloring = depths
 
     # Take the actual picture (matrix multiplication with camera-matrix
-    # + renormalization).
-    points = view_points(lidar_points.points[:3, :],
-                         np.array(cam_calibrated_sensor['camera_intrinsic']),
-                         normalize=True)
+    # + renormalization). Points on/behind the camera plane have z=0 in the
+    # camera frame and trigger a divide-by-zero during normalization; they are
+    # filtered out by the depth mask below, so the warning is silenced here.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        points = view_points(lidar_points.points[:3, :],
+                             np.array(cam_calibrated_sensor['camera_intrinsic']),
+                             normalize=True)
 
     # Remove points that are either outside or behind the camera.
     # Leave a margin of 1 pixel for aesthetic reasons. Also make
@@ -231,7 +234,8 @@ class NuscDetDataset(Dataset):
                  return_depth=False,
                  sweep_idxes=list(),
                  key_idxes=list(),
-                 use_fusion=False):
+                 use_fusion=False,
+                 gt_visibility_min=None):
         """Dataset used for bevdetection task.
         Args:
             ida_aug_conf (dict): Config for ida augmentation.
@@ -281,6 +285,28 @@ class NuscDetDataset(Dataset):
             'All `key_idxes` must less than 0.'
         self.key_idxes = [0] + key_idxes
         self.use_fusion = use_fusion
+        # Consumed by CarlaDetDataset._keep_ann: when set to an int, keep only
+        # GT boxes whose visibility_token >= this value (CARLA uses 2). The base
+        # class ignores it and uses the num_lidar_pts + num_radar_pts > 0 filter.
+        self.gt_visibility_min = gt_visibility_min
+
+    def _load_lidar_points(self, full_path):
+        """Load lidar points as an (N, 4) xyz+intensity array.
+
+        nuScenes stores a flat float32 .bin with 5 fields per point; we keep
+        the first 4 (xyz + intensity). Overridden by CarlaDetDataset for the
+        CARLA .npz format.
+        """
+        return np.fromfile(full_path, dtype=np.float32,
+                           count=-1).reshape(-1, 5)[..., :4]
+
+    def _keep_ann(self, ann_info):
+        """Whether a GT annotation passes the GT filter.
+
+        Default (nuScenes): keep boxes seen by at least one lidar/radar point.
+        Overridden by CarlaDetDataset to filter on visibility_token instead.
+        """
+        return ann_info['num_lidar_pts'] + ann_info['num_radar_pts'] > 0
 
     def _get_sample_indices(self):
         """Load annotations from ann_file.
@@ -400,10 +426,8 @@ class NuscDetDataset(Dataset):
             sweep_lidar_points = list()
             for lidar_info in lidar_infos:
                 lidar_path = lidar_info['LIDAR_TOP']['filename']
-                lidar_points = np.fromfile(os.path.join(
-                    self.data_root, lidar_path),
-                                           dtype=np.float32,
-                                           count=-1).reshape(-1, 5)[..., :4]
+                full_path = os.path.join(self.data_root, lidar_path)
+                lidar_points = self._load_lidar_points(full_path)
                 sweep_lidar_points.append(lidar_points)
         for cam in cams:
             imgs = list()
@@ -556,10 +580,10 @@ class NuscDetDataset(Dataset):
         gt_labels = list()
         for ann_info in info['ann_infos']:
             # Use ego coordinate.
-            if (map_name_from_general_to_detection[ann_info['category_name']]
-                    not in self.classes
-                    or ann_info['num_lidar_pts'] + ann_info['num_radar_pts'] <=
-                    0):
+            if map_name_from_general_to_detection[
+                    ann_info['category_name']] not in self.classes:
+                continue
+            if not self._keep_ann(ann_info):
                 continue
             box = Box(
                 ann_info['translation'],
@@ -578,7 +602,7 @@ class NuscDetDataset(Dataset):
             gt_labels.append(
                 self.classes.index(map_name_from_general_to_detection[
                     ann_info['category_name']]))
-        return torch.Tensor(gt_boxes), torch.tensor(gt_labels)
+        return torch.Tensor(np.array(gt_boxes)), torch.tensor(gt_labels)
 
     def choose_cams(self):
         """Choose cameras randomly.

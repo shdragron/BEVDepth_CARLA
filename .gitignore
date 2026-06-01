@@ -1,3 +1,6 @@
+### Project data (large CARLA artifacts, external symlinks) ###
+data/
+
 ### Linux ###
 *~
 

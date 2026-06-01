@@ -18,6 +18,7 @@ from bevdepth.evaluators.det_evaluators import DetNuscEvaluator
 from bevdepth.models.base_bev_depth import BaseBEVDepth
 from bevdepth.utils.torch_dist import all_gather_object, get_rank, synchronize
 
+# Imports & 입력 이미지 스펙
 H = 900
 W = 1600
 final_dim = (256, 704)
@@ -25,8 +26,8 @@ img_conf = dict(img_mean=[123.675, 116.28, 103.53],
                 img_std=[58.395, 57.12, 57.375],
                 to_rgb=True)
 
-backbone_conf = {
-    'x_bound': [-51.2, 51.2, 0.8],
+backbone_conf = {  # Image -> BEV feature 까지 전체 흐름 설정
+    'x_bound': [-51.2, 51.2, 0.8],  # bev grid 범위, 셀 크기
     'y_bound': [-51.2, 51.2, 0.8],
     'z_bound': [-5, 3, 8],
     'd_bound': [2.0, 58.0, 0.5],
@@ -54,8 +55,8 @@ backbone_conf = {
     ),
     'depth_net_conf':
     dict(in_channels=512, mid_channels=512)
-}
-ida_aug_conf = {
+} 
+ida_aug_conf = {  # Image Data Augmentation (per-camera)
     'resize_lim': (0.386, 0.55),
     'final_dim':
     final_dim,
@@ -82,7 +83,7 @@ bda_aug_conf = {
     'flip_dy_ratio': 0.5
 }
 
-bev_backbone = dict(
+bev_backbone = dict(  # BEV feature encoder
     type='ResNet',
     in_channels=80,
     depth=18,
@@ -228,6 +229,12 @@ class BEVDepthLightningModel(LightningModule):
         self.depth_channels = int(
             (self.dbound[1] - self.dbound[0]) / self.dbound[2])
         self.use_fusion = False
+        # Optional GT visibility filter; None keeps the default points>0 filter.
+        # Subclasses (e.g. CARLA suv) may set an int threshold.
+        self.gt_visibility_min = None
+        # Dataset class used by the dataloaders. CARLA exps override this with
+        # CarlaDetDataset so the .npz lidar loader + visibility GT filter engage.
+        self.dataset_class = NuscDetDataset
         self.train_info_paths = os.path.join(self.data_root,
                                              'nuscenes_infos_train.pkl')
         self.val_info_paths = os.path.join(self.data_root,
@@ -380,7 +387,7 @@ class BEVDepthLightningModel(LightningModule):
         return [[optimizer], [scheduler]]
 
     def train_dataloader(self):
-        train_dataset = NuscDetDataset(ida_aug_conf=self.ida_aug_conf,
+        train_dataset = self.dataset_class(ida_aug_conf=self.ida_aug_conf,
                                        bda_aug_conf=self.bda_aug_conf,
                                        classes=self.class_names,
                                        data_root=self.data_root,
@@ -392,7 +399,8 @@ class BEVDepthLightningModel(LightningModule):
                                        sweep_idxes=self.sweep_idxes,
                                        key_idxes=self.key_idxes,
                                        return_depth=self.data_return_depth,
-                                       use_fusion=self.use_fusion)
+                                       use_fusion=self.use_fusion,
+                                       gt_visibility_min=self.gt_visibility_min)
 
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
@@ -408,7 +416,7 @@ class BEVDepthLightningModel(LightningModule):
         return train_loader
 
     def val_dataloader(self):
-        val_dataset = NuscDetDataset(ida_aug_conf=self.ida_aug_conf,
+        val_dataset = self.dataset_class(ida_aug_conf=self.ida_aug_conf,
                                      bda_aug_conf=self.bda_aug_conf,
                                      classes=self.class_names,
                                      data_root=self.data_root,
@@ -419,7 +427,8 @@ class BEVDepthLightningModel(LightningModule):
                                      sweep_idxes=self.sweep_idxes,
                                      key_idxes=self.key_idxes,
                                      return_depth=self.use_fusion,
-                                     use_fusion=self.use_fusion)
+                                     use_fusion=self.use_fusion,
+                                     gt_visibility_min=self.gt_visibility_min)
         val_loader = torch.utils.data.DataLoader(
             val_dataset,
             batch_size=self.batch_size_per_device,
@@ -434,7 +443,7 @@ class BEVDepthLightningModel(LightningModule):
         return self.val_dataloader()
 
     def predict_dataloader(self):
-        predict_dataset = NuscDetDataset(ida_aug_conf=self.ida_aug_conf,
+        predict_dataset = self.dataset_class(ida_aug_conf=self.ida_aug_conf,
                                          bda_aug_conf=self.bda_aug_conf,
                                          classes=self.class_names,
                                          data_root=self.data_root,
@@ -445,7 +454,8 @@ class BEVDepthLightningModel(LightningModule):
                                          sweep_idxes=self.sweep_idxes,
                                          key_idxes=self.key_idxes,
                                          return_depth=self.use_fusion,
-                                         use_fusion=self.use_fusion)
+                                         use_fusion=self.use_fusion,
+                                         gt_visibility_min=self.gt_visibility_min)
         predict_loader = torch.utils.data.DataLoader(
             predict_dataset,
             batch_size=self.batch_size_per_device,
