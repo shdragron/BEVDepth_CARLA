@@ -397,6 +397,20 @@ class NuscDetDataset(Dataset):
         return np.concatenate([pts_img[:2, :].T, depth[:, None]],
                               axis=1).astype(np.float32)
 
+    def _get_cam_depth(self, cam_info, img, lidar_info, lidar_points, resize,
+                       resize_dims, crop, flip, rotate):
+        """Augmented depth GT (final_dim H x W) for one camera.
+
+        Default: project the (sparse) lidar points to the image. Subclasses
+        (e.g. CarlaDetDataset) override this to load a dense rendered depth
+        image instead. ``resize_dims`` is unused here but passed for overrides.
+        """
+        point_depth = self.get_lidar_depth(lidar_points, img, lidar_info,
+                                           cam_info)
+        return depth_transform(point_depth, resize,
+                               self.ida_aug_conf['final_dim'], crop, flip,
+                               rotate)
+
     def get_image(self, cam_infos, cams, lidar_infos=None):
         """Given data and cam_names, return image data needed.
 
@@ -503,13 +517,10 @@ class NuscDetDataset(Dataset):
                 intrin_mat[:3, :3] = torch.Tensor(
                     cam_info[cam]['calibrated_sensor']['camera_intrinsic'])
                 if self.return_depth and (self.use_fusion or sweep_idx == 0):
-                    point_depth = self.get_lidar_depth(
-                        sweep_lidar_points[sweep_idx], img,
-                        lidar_infos[sweep_idx], cam_info[cam])
-                    point_depth_augmented = depth_transform(
-                        point_depth, resize, self.ida_aug_conf['final_dim'],
-                        crop, flip, rotate_ida)
-                    lidar_depth.append(point_depth_augmented)
+                    lidar_depth.append(self._get_cam_depth(
+                        cam_info[cam], img, lidar_infos[sweep_idx],
+                        sweep_lidar_points[sweep_idx], resize, resize_dims,
+                        crop, flip, rotate_ida))
                 img, ida_mat = img_transform(
                     img,
                     resize=resize,
