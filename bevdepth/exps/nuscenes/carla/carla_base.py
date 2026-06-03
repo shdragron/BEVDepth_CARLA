@@ -16,10 +16,28 @@ Matches the BEVFormer CARLA setup so the two are comparable:
 import copy
 import os
 
+import torch.multiprocessing as _mp
+
 from bevdepth.datasets.carla_det_dataset import CarlaDetDataset
 from bevdepth.exps.nuscenes.base_exp import \
     BEVDepthLightningModel as BaseBEVDepthLightningModel
 from bevdepth.exps.nuscenes.base_exp import head_conf
+
+# --- DataLoader tensor sharing: file_system, not file_descriptor (/dev/shm) ---
+# On this shared B200 box /dev/shm is a 100 GB container mount that other jobs
+# (the concurrent BEVDet train + VP eval) keep ~2/3 full, leaving < 35 GB. The
+# default 'file_descriptor' strategy stages every prefetched batch through
+# /dev/shm; with num_workers=4 x 2 DDP ranks x prefetch=2 that is ~16 batches in
+# flight, which overruns the free shm and the OS SIGKILLs a worker on the very
+# first fetch ("DataLoader worker killed by signal: Killed" -> rc=137). The
+# 'file_system' strategy instead mmaps temp files under $TMPDIR (=/tmp, a 1.2 TB
+# tmpfs with ~870 GB free here), so we get 25x the headroom and never touch the
+# crowded /dev/shm. (FD ulimit is 1 M, so file_system's per-tensor fd cost is a
+# non-issue.) The run script pins TMPDIR=/tmp to keep this on the big tmpfs.
+try:
+    _mp.set_sharing_strategy('file_system')
+except RuntimeError:
+    pass
 
 # Enable wandb logging by default for these exps (override with USE_WANDB=0).
 os.environ.setdefault('USE_WANDB', '1')
