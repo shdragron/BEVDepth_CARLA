@@ -391,8 +391,17 @@ class BEVDepthLightningModel(LightningModule):
             self.evaluator.evaluate(all_pred_results, all_img_metas)
 
     def configure_optimizers(self):
+        # Linear LR scaling on the EFFECTIVE batch = per-device batch * gpus *
+        # accumulate_grad_batches. Including the accumulation factor keeps the LR
+        # correct when a large effective batch is reached via grad accumulation
+        # (e.g. -b 16 --gpus 2 --accumulate_grad_batches 2 == effective 64 with
+        # the same LR as -b 64 --gpus 1), instead of silently halving it.
+        accumulate = getattr(self.trainer, 'accumulate_grad_batches', 1) or 1
         lr = self.basic_lr_per_img * \
-            self.batch_size_per_device * self.gpus
+            self.batch_size_per_device * self.gpus * accumulate
+        print(f'[LR] basic_lr_per_img={self.basic_lr_per_img:.3e} * batch='
+              f'{self.batch_size_per_device} * gpus={self.gpus} * accum='
+              f'{accumulate} -> lr={lr:.3e}', flush=True)
         optimizer = torch.optim.AdamW(self.model.parameters(),
                                       lr=lr,
                                       weight_decay=1e-7)
