@@ -94,6 +94,16 @@ class CarlaBEVDepthBase(BaseBEVDepthLightningModel):
         # Use the CARLA dataset (npz lidar loader + visibility filter).
         self.dataset_class = CarlaDetDataset
 
+        # depth_net's DeformConv2dPack ships im2col_step=128; mmcv asserts
+        # input.size(0) % min(im2col_step, input.size(0)) == 0. The deform input
+        # is (batch * num_cams) = batch*6, so a per-GPU batch with batch*6 not
+        # divisible by 128 (e.g. 32 -> 192) crashes the first iter. Set
+        # im2col_step=6 so ANY batch is divisible (it is a memory-tiling param
+        # only, so forward/backward numerics are unchanged).
+        for _m in self.model.modules():
+            if hasattr(_m, 'im2col_step'):
+                _m.im2col_step = 6
+
         # --- ALL augmentation OFF (fair comparison with BEVFormer) ---
         # IDA: deterministic resize to final_dim, no crop jitter / flip / rotate.
         # resize=0.44 == 704/1600 makes resized width == final_dim width (704),

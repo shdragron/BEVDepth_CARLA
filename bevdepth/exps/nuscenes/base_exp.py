@@ -399,6 +399,14 @@ class BEVDepthLightningModel(LightningModule):
         scheduler = MultiStepLR(optimizer, [19, 23])
         return [[optimizer], [scheduler]]
 
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric):
+        # torch>=2.0 renamed _LRScheduler -> LRScheduler, so PL 1.6's
+        # `_validate_scheduler_api` no longer recognises MultiStepLR and aborts
+        # training ("doesn't follow PyTorch's LRScheduler API"). Overriding this
+        # hook tells PL we step the scheduler ourselves; epoch-wise step matches
+        # the default interval and the milestones [19, 23].
+        scheduler.step()
+
     def train_dataloader(self):
         train_dataset = self.dataset_class(ida_aug_conf=self.ida_aug_conf,
                                        bda_aug_conf=self.bda_aug_conf,
