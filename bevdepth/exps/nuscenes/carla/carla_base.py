@@ -89,8 +89,9 @@ class CarlaBEVDepthBase(BaseBEVDepthLightningModel):
         # CBGS (class-balanced group sampling): resample the train set so rare
         # classes (truck/motorcycle/bicycle) appear more often -> higher per-class
         # AP -> higher 6-class mAP/NDS. Standard in BEVDepth's reported numbers;
-        # only affects train_dataloader (val/eval pass use_cbgs=False).
-        self.data_use_cbgs = True
+        # only affects train_dataloader (val/eval pass use_cbgs=False). On by
+        # default; set USE_CBGS=0 to disable (it ~4x's the per-epoch samples).
+        self.data_use_cbgs = os.environ.get('USE_CBGS', '1') == '1'
         # Use the CARLA dataset (npz lidar loader + visibility filter).
         self.dataset_class = CarlaDetDataset
 
