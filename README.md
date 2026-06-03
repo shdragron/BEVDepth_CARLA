@@ -1,121 +1,175 @@
-## BEVDepth
-BEVDepth is a new 3D object detector with a trustworthy depth
-estimation. For more details, please refer to our [paper on Arxiv](https://arxiv.org/abs/2206.10092).
+# BEVDepth-CARLA
 
-<img src="assets/bevdepth.png" width="1000" >
+Camera-only 3D object detection on the **CARLA "geobev" per-vehicle (viewpoint)
+dataset**, adapted from [BEVDepth](https://github.com/Megvii-BaseDetection/BEVDepth)
+(Megvii-BaseDetection). This fork trains and evaluates a single-frame BEVDepth
+detector on three vehicle platforms — **sedan / suv / bus** — that differ only by
+camera mount height, using the 6 CARLA classes and the nuScenes-format eval
+protocol so the numbers are directly comparable to the BEVFormer CARLA baseline.
 
-## BEVStereo
-BEVStereo is a new multi-view 3D object detector using temporal stereo to enhance depth estimation.
-<img src="assets/bevstereo.png" width="1000" >
+> **Attribution / License.** This is a derivative work of BEVDepth, released under
+> the **MIT License (Copyright © 2022 Megvii-BaseDetection)** — see
+> [`LICENSE.md`](LICENSE.md), which is unchanged. All upstream BEVDepth / BEVStereo
+> / MatrixVT code and credits remain with the original authors; this fork only adds
+> the CARLA dataset, exp configs, evaluator changes, and the training/eval glue
+> documented below. Please cite the original BEVDepth paper
+> ([arXiv:2206.10092](https://arxiv.org/abs/2206.10092)) when using this work.
 
-## MatrixVT
-[MatrixVT](bevdepth/exps/nuscenes/MatrixVT/matrixvt_bev_depth_lss_r50_256x704_128x128_24e_ema.py) is a novel View Transformer for BEV paradigm with high efficiency and without customized operators. For more details, please refer to our [paper on Arxiv](https://arxiv.org/abs/2211.10593). Try MatrixVT on **CPU** by run [this file](bevdepth/layers/backbones/matrixvt.py) !
-<img src="assets/matrixvt.jpg" width="1000" >
+---
 
-## Updates!!
-* 【2022/12/06】 We released our new View Transformer (MatrixVT), the paper is on [Arxiv](https://arxiv.org/abs/2211.10593).
-* 【2022/11/30】 We updated our paper(BEVDepth) on [Arxiv](https://arxiv.org/abs/2206.10092).
-* 【2022/11/18】 Both BEVDepth and BEVStereo were accepted by AAAI'2023.
-* 【2022/09/22】 We released our paper(BEVStereo) on [Arxiv](https://arxiv.org/abs/2209.10248).
-* 【2022/08/24】 We submitted our result(BEVStereo) on [nuScenes Detection Task](https://nuscenes.org/object-detection?externalData=all&mapData=all&modalities=Camera) and achieved the SOTA.
-* 【2022/06/23】 We submitted our result(BEVDepth) without extra data on [nuScenes Detection Task](https://nuscenes.org/object-detection?externalData=all&mapData=all&modalities=Camera) and achieved the SOTA.
-* 【2022/06/21】 We released our paper(BEVDepth) on [Arxiv](https://arxiv.org/abs/2206.10092).
-* 【2022/04/11】 We submitted our result(BEVDepth) on [nuScenes Detection Task](https://nuscenes.org/object-detection?externalData=all&mapData=all&modalities=Camera) and achieved the SOTA.
+## What this fork adds
 
+* **CARLA dataset** (`bevdepth/datasets/carla_det_dataset.py`): nuScenes-format
+  per-vehicle DBs, `.npz` lidar loader, and **dense DPT depth** as depth-loss GT
+  (instead of sparse lidar projection).
+* **6 classes**: `car, truck, bus, motorcycle, bicycle, pedestrian`.
+* **Visibility-based GT** (`gt_visibility_min=2`): GT boxes are kept by
+  `visibility_token >= 2` (matching the BEVFormer baseline / the dataset's
+  `valid_flag`), **not** by `num_lidar_pts > 0`. This applies to **both training
+  and evaluation** so the two are consistent.
+* **6-class NDS evaluator** (`bevdepth/evaluators/det_evaluators.py`): recomputes
+  mAP/NDS over exactly the 6 CARLA classes (the devkit's 10-class average is
+  diluted by 4 absent classes), runs the stock nuScenes devkit on the custom
+  `v1.0-carla_*_eval` DBs, and prints a scrapeable
+  `[CARLA-EVAL] 6-class mAP=.. NDS=..` line.
+* **CBGS** (class-balanced group sampling) on by default for CARLA, to lift the
+  rare-class AP (truck / motorcycle / bicycle).
+* **Per-epoch 6-class validation** logged to **Weights & Biases** (`val/NDS`,
+  `val/mAP`).
+* Exp configs `bevdepth/exps/nuscenes/carla/carla_{sedan,suv,bus}.py`.
 
-## Quick Start
-### Installation
-**Step 0.** Install [pytorch](https://pytorch.org/)(v1.9.0).
+---
 
-**Step 1.** Install [MMDetection3D](https://github.com/open-mmlab/mmdetection3d)(v1.0.0rc4).
+## 1. Environment
 
-**Step 2.** Install requirements.
-```shell
-pip install -r requirements.txt
+Validated on **NVIDIA B200 (Blackwell, sm_100) / CUDA 12.8**, Python 3.10, with:
+
+| package | version |
+|---|---|
+| torch / torchvision | 2.x (built for your CUDA; cu128 for B200) |
+| pytorch-lightning | **1.6.2** |
+| torchmetrics | **0.7.2** |
+| mmcv(-full) | 1.7.1 |
+| mmdet | 2.14.0 |
+| mmdet3d | 0.17.1 |
+| numba, nuscenes-devkit, tensorboardX, wandb | latest |
+
+> For older GPUs you can instead follow upstream BEVDepth's install
+> (torch 1.9.0 + mmdet3d v1.0.0rc4); the CARLA code only uses stable mm-stack APIs.
+
+```bash
+# 0) create/activate an env that already has a CUDA-matched torch + the mm-stack
+#    (mmcv-full / mmdet / mmdet3d built for your GPU).
+conda create -n bevdepth python=3.10 -y && conda activate bevdepth
+#    ... install torch + mmcv-full + mmdet + mmdet3d for your CUDA here ...
+
+# 1) PyTorch-Lightning 1.6.2 (BEVDepth uses the PL-1.x Trainer API).
+#    PL 1.6.2 ships invalid metadata that pip>=24.1 rejects, so pin pip first:
+pip install "pip<24.1"
+pip install --no-deps pytorch_lightning==1.6.2 torchmetrics==0.7.2 \
+            tensorboardX pyDeprecate==0.3.2
+pip install numba nuscenes-devkit wandb
+
+# 2) compile the voxel-pooling CUDA ops. CUDA_HOME MUST point at the CUDA that
+#    your torch was built with (else nvcc/torch version mismatch). On B200:
+CUDA_HOME=$CONDA_PREFIX TORCH_CUDA_ARCH_LIST="10.0" \
+    python setup.py develop          # or: build_ext --inplace
 ```
-**Step 3.** Install BEVDepth(gpu required).
-```shell
-python setup.py develop
+
+Run the exps **from the repo root** (so `import bevdepth` and `data/carla`
+resolve). Log in to wandb once (`wandb login`) or export `WANDB_API_KEY`.
+
+---
+
+## 2. Data preparation
+
+The CARLA geobev dataset is a set of **per-vehicle nuScenes-format DBs** under one
+root (`carla_geobev/`): train DBs `v1.0-carla_{sedan,suv,bus}` (220 scenes each)
+and eval DBs `v1.0-carla_{sedan,suv,bus}_eval` (48 val scenes, from
+`split/val.txt`). Images / lidar / DPT-depth live under the same root.
+
+```bash
+# symlink the dataset root to ./data/carla (images, lidar, DPT depth, DBs)
+ln -s /path/to/carla_geobev data/carla
+
+# build the info pkls -> ./data/carla_infos_{train,val}_<veh>.pkl
+# train (per vehicle):
+python scripts/gen_info_carla.py      --version v1.0-carla_sedan      --tag sedan
+python scripts/gen_info_carla.py      --version v1.0-carla_suv        --tag suv
+python scripts/gen_info_carla.py      --version v1.0-carla_bus        --tag bus
+# eval / val (per vehicle):
+python scripts/gen_info_carla_eval.py --version v1.0-carla_sedan_eval --tag sedan
+python scripts/gen_info_carla_eval.py --version v1.0-carla_suv_eval   --tag suv
+python scripts/gen_info_carla_eval.py --version v1.0-carla_bus_eval   --tag bus
 ```
 
-### Data preparation
-**Step 0.** Download nuScenes official dataset.
+Each `gen_info_carla_eval` run prints `val samples: 3792` and drops the one DB
+scene not in `val.txt` (`scene_0260`) so the val set matches the baseline exactly.
 
-**Step 1.** Symlink the dataset root to `./data/`.
-```
-ln -s [nuscenes root] ./data/
-```
-The directory will be as follows.
-```
-BEVDepth
-├── data
-│   ├── nuScenes
-│   │   ├── maps
-│   │   ├── samples
-│   │   ├── sweeps
-│   │   ├── v1.0-test
-|   |   ├── v1.0-trainval
-```
-**Step 2.** Prepare infos.
-```
-python scripts/gen_info.py
+---
+
+## 3. Training
+
+One exp per vehicle; only `VEHICLE` differs. CBGS is on, validation runs the
+**6-class** eval **every epoch** and logs `val/NDS` / `val/mAP` to wandb.
+
+```bash
+# sedan (use carla_suv.py / carla_bus.py for the others)
+CUDA_VISIBLE_DEVICES=0 python bevdepth/exps/nuscenes/carla/carla_sedan.py \
+    --amp_backend native -b 32 --gpus 1 \
+    --limit_val_batches 1.0 --check_val_every_n_epoch 1
 ```
 
-### Tutorials
-**Train.**
+* `-b` = batch size **per device**; learning rate scales automatically
+  (`2e-4/64 * b * gpus`). `-b 64 --gpus 1` reproduces the original setup if it
+  fits your GPU; `-b 32` is a lighter alternative.
+* `--limit_val_batches 1.0 --check_val_every_n_epoch 1` enables the full 6-class
+  validation every epoch (the default disables validation).
+* fp32, no EMA (set in `carla_*.py` for a fair comparison with BEVFormer).
+* Disable wandb with `USE_WANDB=0`; set the project with `WANDB_PROJECT=...`.
+* Multi-GPU: `--gpus 2 --strategy ddp` (lr scales with total batch).
+
+Checkpoints land in `./outputs/carla_<veh>/lightning_logs/.../checkpoints/`.
+
+---
+
+## 4. Evaluation
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python bevdepth/exps/nuscenes/carla/carla_sedan.py \
+    --ckpt_path /path/to/checkpoint.ckpt -e --gpus 1 -b 8
 ```
-python [EXP_PATH] --amp_backend native -b 8 --gpus 8
+
+Output (the `[CARLA-EVAL]` line is the comparable metric):
+
 ```
-**Eval.**
+[CARLA-EVAL] version=v1.0-carla_sedan_eval eval_split=val min_visibility>=2 pred_samples=3792 carla_scenes=48
+[CARLA-EVAL] 6-class mAP=0.2955 NDS=0.3278
+[CARLA-METRICS-JSON] {...full per-class AP / 6-class & 10-class TP errors / NDS...}
 ```
-python [EXP_PATH] --ckpt_path [CKPT_PATH] -e -b 8 --gpus 8
-```
 
-### Benchmark
-|Exp |EMA| CBGS |mAP |mATE| mASE | mAOE |mAVE| mAAE | NDS | weights |
-| ------ | :---: | :---: | :---:       |:---:     |:---:  | :---: | :----: | :----: | :----: | :----: |
-|[BEVDepth](bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_24e_2key.py)| | |0.3304| 0.7021| 0.2795| 0.5346| 0.5530| 0.2274| 0.4355 | [github](https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key.pth)
-|[BEVDepth](bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_24e_2key_ema.py)|√ | |0.3329 |  0.6832     |0.2761 | 0.5446 | 0.5258 | 0.2259 | 0.4409 | [github](https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key_ema.pth)
-|[BEVDepth](bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_20e_cbgs_2key_da.py)| |√ |0.3484| 0.6159| 0.2716| 0.4144| 0.4402| 0.1954| 0.4805 | [github](https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_20e_cbgs_2key_da.pth)
-|[BEVDepth](bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_20e_cbgs_2key_da_ema.py)|√  |√ |0.3589 |  0.6119     |0.2692 | 0.5074 | 0.4086 | 0.2009 | 0.4797 | [github](https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_20e_cbgs_2key_da_ema.pth) |
-|[BEVStereo](bevdepth/exps/nuscenes/mv/bev_stereo_lss_r50_256x704_128x128_24e_2key.py)|  | |0.3456 | 0.6589 | 0.2774 | 0.5500 | 0.4980 | 0.2278 | 0.4516 | [github](https://github.com/Megvii-BaseDetection/BEVStereo/releases/download/v0.0.2/bev_stereo_lss_r50_256x704_128x128_24e_2key.pth) |
-|[BEVStereo](bevdepth/exps/nuscenes/mv/bev_stereo_lss_r50_256x704_128x128_24e_2key_ema.py)|√  | |0.3494|	0.6671|	0.2785|	0.5606|	0.4686|	0.2295|	0.4543 | [github](https://github.com/Megvii-BaseDetection/BEVStereo/releases/download/v0.0.2/bev_stereo_lss_r50_256x704_128x128_24e_2key_ema.pth) |
-|[BEVStereo](bevdepth/exps/nuscenes/mv/bev_stereo_lss_r50_256x704_128x128_24e_key4.py)|  | |0.3427|	0.6560|	0.2784|	0.5982|	0.5347|	0.2228|	0.4423 | [github](https://github.com/Megvii-BaseDetection/BEVStereo/releases/download/v0.0.2/bev_stereo_lss_r50_256x704_128x128_24e_key4.pth) |
-|[BEVStereo](bevdepth/exps/nuscenes/mv/bev_stereo_lss_r50_256x704_128x128_24e_key4_ema.py)|√  | |0.3435|	0.6585|	0.2757|	0.5792|	0.5034|	0.2163|	0.4485 | [github](https://github.com/Megvii-BaseDetection/BEVStereo/releases/download/v0.0.2/bev_stereo_lss_r50_256x704_128x128_24e_key4_ema.pth) |
-|[BEVStereo](bevdepth/exps/nuscenes/mv/bev_stereo_lss_r50_256x704_128x128_20e_cbgs_2key_da.py)|  |√ |0.3576|	0.6071|	0.2684|	0.4157|	0.3928|	0.2021|	0.4902 | [github](https://github.com/Megvii-BaseDetection/BEVStereo/releases/download/v0.0.2/bev_stereo_lss_r50_256x704_128x128_20e_cbgs_2key_da.pth) |
-|[BEVStereo](bevdepth/exps/nuscenes/mv/bev_stereo_lss_r50_256x704_128x128_20e_cbgs_2key_da_ema.py)|√  |√ |0.3721|	0.5980|	0.2701|	0.4381|	0.3672|	0.1898|	0.4997 | [github](https://github.com/Megvii-BaseDetection/BEVStereo/releases/download/v0.0.2/bev_stereo_lss_r50_256x704_128x128_20e_cbgs_2key_da_ema.pth) |
+* The evaluator loads GT from the per-vehicle `v1.0-carla_<veh>_eval` DB, keeps
+  `visibility_token >= 2`, and computes mAP/NDS over exactly the 6 CARLA classes.
+* `NDS` / `mAP` are the 6-class scores; `*_allclass` / `*_10class` keys in the
+  JSON are the diluted 10-class devkit values (for reference only).
 
-## FAQ
+---
 
-### EMA
-- The results are different between evaluation during training and evaluation from ckpt.
+## 5. Notes / known characteristics
 
-Due to the working mechanism of EMA, the model parameters saved by ckpt are different from the model parameters used in the training stage.
+* **Single-frame velocity.** These exps are single-frame (`num_sweeps=1`,
+  `key_idxes=[]`), so velocity is unestimable: `mAVE ≈ object speed` and the
+  velocity term contributes ~0 to NDS (caps NDS near ~0.40). Enable multi-frame
+  to recover it.
+* **CBGS** chiefly helps the rare classes (truck / motorcycle / bicycle) and
+  hence the 6-class mAP/NDS; it only affects `train_dataloader` (val/eval use
+  `use_cbgs=False`).
+* **DPT depth** is used as depth-loss GT (dense), only when `return_depth=True`
+  (training); evaluation never loads depth, so it is image-only.
 
-- EMA exps are unable to resume training from ckpt.
+---
 
-We used the customized EMA callback and this function is not supported for now.
+## Acknowledgements
 
-## Cite BEVDepth & BEVStereo & MatrixVT
-If you use BEVDepth and BEVStereo in your research, please cite our work by using the following BibTeX entry:
-
-```latex
- @article{li2022bevdepth,
-  title={BEVDepth: Acquisition of Reliable Depth for Multi-view 3D Object Detection},
-  author={Li, Yinhao and Ge, Zheng and Yu, Guanyi and Yang, Jinrong and Wang, Zengran and Shi, Yukang and Sun, Jianjian and Li, Zeming},
-  journal={arXiv preprint arXiv:2206.10092},
-  year={2022}
-}
-@article{li2022bevstereo,
-  title={Bevstereo: Enhancing depth estimation in multi-view 3d object detection with dynamic temporal stereo},
-  author={Li, Yinhao and Bao, Han and Ge, Zheng and Yang, Jinrong and Sun, Jianjian and Li, Zeming},
-  journal={arXiv preprint arXiv:2209.10248},
-  year={2022}
-}
-@article{zhou2022matrixvt,
-  title={MatrixVT: Efficient Multi-Camera to BEV Transformation for 3D Perception},
-  author={Zhou, Hongyu and Ge, Zheng and Li, Zeming and Zhang, Xiangyu},
-  journal={arXiv preprint arXiv:2211.10593},
-  year={2022}
-}
-```
+Built on [BEVDepth](https://github.com/Megvii-BaseDetection/BEVDepth) (and
+BEVStereo / MatrixVT) by Megvii-BaseDetection. See [`LICENSE.md`](LICENSE.md) (MIT).

@@ -68,6 +68,14 @@ class CarlaBEVDepthBase(BaseBEVDepthLightningModel):
         self.train_info_paths = f'data/carla_infos_train_{veh}.pkl'
         self.val_info_paths = f'data/carla_infos_val_{veh}.pkl'
         self.predict_info_paths = f'data/carla_infos_val_{veh}.pkl'
+        # CTS/VP condition-pkl injection (null-effect when unset): the
+        # bev_det_benchmark runners point `-e` eval at a swapped condition pkl
+        # via CARLA_VAL_INFO so the model runs unchanged. Only val/predict are
+        # read in eval; training (CARLA_VAL_INFO unset) is unaffected.
+        _cond_pkl = os.environ.get('CARLA_VAL_INFO')
+        if _cond_pkl:
+            self.val_info_paths = _cond_pkl
+            self.predict_info_paths = _cond_pkl
         # Evaluator reads GT from the per-vehicle eval DB.
         self.evaluator.data_root = CARLA_DB_ROOT
         self.evaluator.version = f'v1.0-carla_{veh}_eval'
@@ -78,6 +86,11 @@ class CarlaBEVDepthBase(BaseBEVDepthLightningModel):
         # visibility >= 2 GT filter (matches BEVFormer); CarlaDetDataset applies
         # it via _keep_ann, replacing the default num_lidar_pts+radar>0 filter.
         self.gt_visibility_min = 2
+        # CBGS (class-balanced group sampling): resample the train set so rare
+        # classes (truck/motorcycle/bicycle) appear more often -> higher per-class
+        # AP -> higher 6-class mAP/NDS. Standard in BEVDepth's reported numbers;
+        # only affects train_dataloader (val/eval pass use_cbgs=False).
+        self.data_use_cbgs = True
         # Use the CARLA dataset (npz lidar loader + visibility filter).
         self.dataset_class = CarlaDetDataset
 

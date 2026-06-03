@@ -357,7 +357,20 @@ class BEVDepthLightningModel(LightningModule):
         all_img_metas = sum(map(list, zip(*all_gather_object(all_img_metas))),
                             [])[:len_dataset]
         if get_rank() == 0:
-            self.evaluator.evaluate(all_pred_results, all_img_metas)
+            detail = self.evaluator.evaluate(all_pred_results, all_img_metas)
+            # Log the recomputed 6-class (CARLA) val NDS/mAP each val epoch so
+            # the wandb/TensorBoard curve is the comparable 6-class metric.
+            if detail:
+                nds = next((v for k, v in detail.items()
+                            if k.endswith('/NDS')), None)
+                mapc = next((v for k, v in detail.items()
+                             if k.endswith('/mAP')), None)
+                if nds is not None:
+                    self.log('val/NDS', float(nds), rank_zero_only=True,
+                             prog_bar=True)
+                if mapc is not None:
+                    self.log('val/mAP', float(mapc), rank_zero_only=True,
+                             prog_bar=True)
 
     def test_epoch_end(self, test_step_outputs):
         all_pred_results = list()

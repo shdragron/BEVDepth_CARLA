@@ -11,6 +11,11 @@ from pyquaternion import Quaternion
 
 __all__ = ['DetNuscEvaluator']
 
+# CARLA GT-validity rule for eval: keep annotations with visibility_token >= this.
+# Matches training (CarlaDetDataset.gt_visibility_min=2) and BEVFormer's
+# visibility>=2 valid_flag, instead of the devkit's default num_pts>0 rule.
+CARLA_MIN_VISIBILITY = 2
+
 
 class DetNuscEvaluator():
     ErrNameMapping = {
@@ -87,13 +92,94 @@ class DetNuscEvaluator():
             'v1.0-mini': 'mini_val',
             'v1.0-trainval': 'val',
         }
-        nusc_eval = NuScenesEval(nusc,
-                                 config=self.eval_detection_configs,
-                                 result_path=result_path,
-                                 eval_set=eval_set_map[self.version],
-                                 output_dir=output_dir,
-                                 verbose=False)
-        nusc_eval.main(render_curves=False)
+        if self.version in eval_set_map:
+            nusc_eval = NuScenesEval(nusc,
+                                     config=self.eval_detection_configs,
+                                     result_path=result_path,
+                                     eval_set=eval_set_map[self.version],
+                                     output_dir=output_dir,
+                                     verbose=False)
+            nusc_eval.main(render_curves=False)
+        else:
+            # --- CARLA custom version (e.g. v1.0-carla_sedan_eval) ----------
+            # The stock devkit only knows v1.0-{mini,trainval,test} and filters
+            # GT by num_lidar_pts+num_radar_pts>0 (the nuScenes "valid" rule).
+            # CARLA instead (a) uses a custom version string + scene names and
+            # (b) trains on a *visibility*-based valid set (gt_visibility_min=2),
+            # NOT num_pts -- and BEVFormer's pkl valid_flag is likewise
+            # visibility>=2. To make eval match TRAINING (and stay comparable to
+            # BEVFormer) we swap in a custom load_gt that:
+            #   1. restricts GT to exactly the predicted scenes (so the devkit
+            #      pred==gt sample_tokens assertion holds -- the eval DB may hold
+            #      scenes val.txt drops, e.g. scene_0260);
+            #   2. keeps only GT with visibility_token >= CARLA_MIN_VISIBILITY
+            #      (== training's gt_visibility_min), replacing the num_pts rule;
+            #   3. forces num_pts=1 so the devkit's num_pts==0 removal in
+            #      filter_eval_boxes is a no-op (visibility is now the sole
+            #      validity rule). class_range distance filtering is unchanged.
+            # Only evaluate.load_gt is patched (scoped to this construction);
+            # the rest is stock NuScenesEval, so the 6-class NDS is computed
+            # identically to BEVFormer.
+            assert 'carla' in self.version, \
+                f'Unknown dataset version for eval: {self.version!r}'
+            import tqdm as _tqdm
+            from nuscenes.eval.common.data_classes import EvalBoxes
+            from nuscenes.eval.detection.utils import category_to_detection_name
+            from nuscenes.eval.detection import evaluate as _eval_mod
+
+            pred_tokens = set(mmcv.load(result_path)['results'].keys())
+            scene_tokens = {nusc.get('sample', t)['scene_token']
+                            for t in pred_tokens}
+            carla_scenes = {nusc.get('scene', st)['name']
+                            for st in scene_tokens}
+            print(f'[CARLA-EVAL] version={self.version} eval_split=val '
+                  f'min_visibility>={CARLA_MIN_VISIBILITY} '
+                  f'pred_samples={len(pred_tokens)} '
+                  f'carla_scenes={len(carla_scenes)}', flush=True)
+            attribute_map = {a['token']: a['name'] for a in nusc.attribute}
+
+            def _carla_load_gt(nusc_, eval_split, box_cls, verbose=False):
+                """GT loader keeping visibility_token >= CARLA_MIN_VISIBILITY
+                (training parity), num_pts forced to 1, restricted to EXACTLY the
+                predicted samples. Using pred_tokens (not whole scenes) makes the
+                devkit pred==gt assertion hold for both the full eval set and a
+                frames-per-scene subset (VP)."""
+                gt = EvalBoxes()
+                for st in _tqdm.tqdm(sorted(pred_tokens), leave=verbose):
+                    boxes = []
+                    for at in nusc_.get('sample', st)['anns']:
+                        a = nusc_.get('sample_annotation', at)
+                        dn = category_to_detection_name(a['category_name'])
+                        if dn is None:
+                            continue
+                        if int(a['visibility_token']) < CARLA_MIN_VISIBILITY:
+                            continue
+                        attr = a['attribute_tokens']
+                        attribute_name = (attribute_map[attr[0]]
+                                          if len(attr) == 1 else '')
+                        boxes.append(box_cls(
+                            sample_token=st,
+                            translation=a['translation'], size=a['size'],
+                            rotation=a['rotation'],
+                            velocity=nusc_.box_velocity(a['token'])[:2],
+                            num_pts=1,
+                            detection_name=dn, detection_score=-1.0,
+                            attribute_name=attribute_name))
+                    gt.add_boxes(st, boxes)
+                return gt
+
+            _orig_load_gt = _eval_mod.load_gt
+            _eval_mod.load_gt = _carla_load_gt
+            try:
+                nusc_eval = NuScenesEval(nusc,
+                                         config=self.eval_detection_configs,
+                                         result_path=result_path,
+                                         eval_set='val',
+                                         output_dir=output_dir,
+                                         verbose=False)
+            finally:
+                _eval_mod.load_gt = _orig_load_gt
+            nusc_eval.main(render_curves=False)
 
         # record metrics
         metrics = mmcv.load(osp.join(output_dir, 'metrics_summary.json'))
@@ -130,6 +216,17 @@ class DetNuscEvaluator():
         detail['{}/mAP'.format(metric_prefix)] = mAPc
         detail['{}/NDS_allclass'.format(metric_prefix)] = metrics['nd_score']
         detail['{}/mAP_allclass'.format(metric_prefix)] = metrics['mean_ap']
+        # 6-class TP-error components (nanmean over self.class_names) -- the
+        # ingredients of ndsc -- and *_10class aliases, so the bev_det_benchmark
+        # CTS driver populates its mATE..mAAE / NDS_10class / mAP_10class
+        # columns (key-name parity with BEVFormer's CarlaNuScenesDataset).
+        for m in tp_keys:
+            err6 = float(np.nanmean(
+                [metrics['label_tp_errors'][c][m] for c in self.class_names]))
+            detail['{}/{}_6class'.format(
+                metric_prefix, self.ErrNameMapping[m])] = round(err6, 4)
+        detail['{}/NDS_10class'.format(metric_prefix)] = metrics['nd_score']
+        detail['{}/mAP_10class'.format(metric_prefix)] = metrics['mean_ap']
         return detail
 
     def format_results(self,
@@ -222,15 +319,32 @@ class DetNuscEvaluator():
         result_files, tmp_dir = self.format_results(results, img_metas,
                                                     result_names,
                                                     jsonfile_prefix)
+        detail = None
         if isinstance(result_files, dict):
             for name in result_names:
                 print('Evaluating bboxes of {}'.format(name))
-                self._evaluate_single(result_files[name])
+                detail = self._evaluate_single(result_files[name])
         elif isinstance(result_files, str):
-            self._evaluate_single(result_files)
+            detail = self._evaluate_single(result_files)
+
+        # Surface the recomputed N-class (CARLA: 6) mAP/NDS on stdout so the
+        # bev_det_benchmark drivers can scrape it (same format as BEVFormer's
+        # tools/test.py [CARLA-EVAL] line). detail otherwise only lives in the
+        # discarded return value above.
+        if detail is not None:
+            import json as _json
+            nds = next((v for k, v in detail.items()
+                        if k.endswith('/NDS')), None)
+            mapc = next((v for k, v in detail.items()
+                         if k.endswith('/mAP')), None)
+            if nds is not None and mapc is not None:
+                print('[CARLA-EVAL] {}-class mAP={:.4f} NDS={:.4f}'.format(
+                    len(self.class_names), mapc, nds), flush=True)
+                print('[CARLA-METRICS-JSON] ' + _json.dumps(detail), flush=True)
 
         if tmp_dir is not None:
             tmp_dir.cleanup()
+        return detail
 
     def _format_bbox(self, results, img_metas, jsonfile_prefix=None):
         """Convert the results to the standard format.

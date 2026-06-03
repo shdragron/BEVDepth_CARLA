@@ -48,13 +48,22 @@ def run_cli(model_class=BEVDepthLightningModel,
         pl.seed_everything(args.seed)
 
     model = model_class(**vars(args))
+    # wandb logging for training runs (USE_WANDB=0 -> default TensorBoard logger);
+    # eval/predict keep the default logger so nothing changes there.
+    train_logger = True
+    if not args.evaluate and not args.predict and \
+            os.environ.get('USE_WANDB', '1') != '0':
+        from pytorch_lightning.loggers import WandbLogger
+        train_logger = WandbLogger(
+            project=os.environ.get('WANDB_PROJECT', 'carla_bevdepth'),
+            name=exp_name, save_dir=os.path.join('./outputs/', exp_name))
+    callbacks = []
     if use_ema:
         train_dataloader = model.train_dataloader()
-        ema_callback = EMACallback(
-            len(train_dataloader.dataset) * args.max_epochs)
-        trainer = pl.Trainer.from_argparse_args(args, callbacks=[ema_callback])
-    else:
-        trainer = pl.Trainer.from_argparse_args(args)
+        callbacks.append(
+            EMACallback(len(train_dataloader.dataset) * args.max_epochs))
+    trainer = pl.Trainer.from_argparse_args(
+        args, callbacks=callbacks, logger=train_logger)
     if args.evaluate:
         trainer.test(model, ckpt_path=args.ckpt_path)
     elif args.predict:
