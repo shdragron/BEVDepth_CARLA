@@ -46,7 +46,7 @@ Validated on **NVIDIA B200 (Blackwell, sm_100) / CUDA 12.8**, Python 3.10, with:
 
 | package | version |
 |---|---|
-| torch / torchvision | 2.x (built for your CUDA; cu128 for B200) |
+| torch / torchvision | 2.x (built for your CUDA; cu128 for B200). Validated on **2.11.0+cu128 / cuDNN 9.19** |
 | pytorch-lightning | **1.6.2** |
 | torchmetrics | **0.7.2** |
 | mmcv-full | **1.7.1** (build from source, `-std=c++17`) |
@@ -197,6 +197,16 @@ Output (the `[CARLA-EVAL]` line is the comparable metric):
   `use_cbgs=False`).
 * **DPT depth** is used as depth-loss GT (dense), only when `return_depth=True`
   (training); evaluation never loads depth, so it is image-only.
+* **TF32 is disabled (full fp32).** `carla_base.py` sets
+  `cuda.matmul.allow_tf32 = cudnn.allow_tf32 = False` +
+  `set_float32_matmul_precision('highest')`. Even at Trainer `precision=32`, TF32
+  stays on for cuDNN convs by default, and on B200 the depth net's TF32 conv path
+  is **cuDNN-version dependent** — cuDNN 9.19 is stable, but e.g. cuDNN 9.7.1 picks
+  an unstable TF32 conv kernel and `depth_loss` diverges (climbs without bound)
+  while `detection_loss` stays flat. Forcing full fp32 makes training stable and
+  bit-reproducible across cuDNN/GPU versions; it is also what the fair-comparison
+  `precision=32` intends. (Cost: a little slower; B200 fp32 throughput makes it
+  negligible.)
 
 ---
 

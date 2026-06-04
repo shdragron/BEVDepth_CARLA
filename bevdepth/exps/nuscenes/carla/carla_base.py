@@ -16,6 +16,7 @@ Matches the BEVFormer CARLA setup so the two are comparable:
 import copy
 import os
 
+import torch
 import torch.multiprocessing as _mp
 
 from bevdepth.datasets.carla_det_dataset import CarlaDetDataset
@@ -37,6 +38,24 @@ from bevdepth.exps.nuscenes.base_exp import head_conf
 try:
     _mp.set_sharing_strategy('file_system')
 except RuntimeError:
+    pass
+
+# --- Force full-precision fp32 (no TF32) for stability across cuDNN versions ---
+# These exps run Trainer precision=32, but TF32 (10-bit mantissa) silently stays
+# on for cuDNN convolutions (cudnn.allow_tf32 defaults True). On B200 the depth
+# net's TF32 conv path is *cuDNN-version dependent*: cuDNN 9.19 is stable, but
+# cuDNN 9.7.1 picks a TF32 conv kernel that is numerically unstable here -> the
+# depth distribution's gradient drifts every step and `depth_loss` climbs without
+# bound (e.g. 19 -> 47 -> 107 ...) while detection_loss stays flat (it tolerates
+# the noise). Verified: disabling TF32 holds depth_loss flat (~20) to step 119 on
+# the env that otherwise diverged. Turning TF32 off makes precision=32 actually
+# full fp32 (which is what the fair-comparison setup intends) and removes the
+# hardware/cuDNN-version dependence, so a fresh clone trains identically anywhere.
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+try:
+    torch.set_float32_matmul_precision('highest')
+except AttributeError:
     pass
 
 # Enable wandb logging by default for these exps (override with USE_WANDB=0).
