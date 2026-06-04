@@ -49,29 +49,60 @@ Validated on **NVIDIA B200 (Blackwell, sm_100) / CUDA 12.8**, Python 3.10, with:
 | torch / torchvision | 2.x (built for your CUDA; cu128 for B200) |
 | pytorch-lightning | **1.6.2** |
 | torchmetrics | **0.7.2** |
-| mmcv(-full) | 1.7.1 |
-| mmdet | 2.14.0 |
-| mmdet3d | 0.17.1 |
+| mmcv-full | **1.7.1** (build from source, `-std=c++17`) |
+| mmdet | **2.14.0** (raise its mmcv cap) |
+| mmdet3d | **0.17.1** (+ `patches/mmdet3d-0.17.1-torch2x.patch`) |
 | numba, nuscenes-devkit, tensorboardX, wandb | latest |
 
-> For older GPUs you can instead follow upstream BEVDepth's install
-> (torch 1.9.0 + mmdet3d v1.0.0rc4); the CARLA code only uses stable mm-stack APIs.
+> **Why these three need a touch on torch 2.x.** The mm-stack pinned above is the
+> 2021 line that BEVDepth/BEVFormer were written against; it predates torch 2.x and
+> needs three *small, verified* adjustments to build/import on a modern (B200 /
+> torch 2.x) box. None change any op math — they are header/flag/version fixes only,
+> so results are identical to the original stack. (For older GPUs you can instead
+> follow upstream BEVDepth: torch 1.9.0 + mmdet3d v1.0.0rc4, no patches.)
+>
+> 1. **mmcv-full 1.7.1** pins `-std=c++14`, which fails against torch ≥ 2.x headers
+>    (`#error You need C++17 ...`). Build it from source with `-std=c++17`.
+> 2. **mmdet 2.14.0** caps `mmcv_maximum_version='1.4.0'`, rejecting 1.7.1 — raise
+>    the cap (one line; mmdet 2.x ships no CUDA ops, so it is otherwise pure-Python).
+> 3. **mmdet3d 0.17.1** caps mmcv the same way *and* its 6 point-cloud ops include
+>    `THC/THC.h`, removed in torch ≥ 1.11. Apply the bundled
+>    [`patches/mmdet3d-0.17.1-torch2x.patch`](patches/mmdet3d-0.17.1-torch2x.patch)
+>    (9 KB: THC→ATen headers, `-std=c++17`, mmcv cap, a couple of `np.long` fixes),
+>    then build. *Note:* BEVDepth is camera-only and uses only pure-Python mmdet3d
+>    symbols (`build_neck`, `CenterHead`/`circle_nms`, `draw_heatmap_gaussian`/
+>    `gaussian_radius`, `clip_sigmoid`) — none of the THC point ops — so the patch
+>    is only needed to make `pip install -e .` succeed, not for inference.
 
 ```bash
-# 0) create/activate an env that already has a CUDA-matched torch + the mm-stack
-#    (mmcv-full / mmdet / mmdet3d built for your GPU).
+# 0) env with a CUDA-matched torch (cu128 for B200).
 conda create -n bevdepth python=3.10 -y && conda activate bevdepth
-#    ... install torch + mmcv-full + mmdet + mmdet3d for your CUDA here ...
+#    ... install torch/torchvision for your CUDA here ...
 
-# 1) PyTorch-Lightning 1.6.2 (BEVDepth uses the PL-1.x Trainer API).
+# 1) mmcv-full 1.7.1 from source with C++17 (the only change vs stock):
+git clone -b v1.7.1 https://github.com/open-mmlab/mmcv.git && cd mmcv
+sed -i -E "s/-std=c\+\+14/-std=c++17/g" setup.py
+MMCV_WITH_OPS=1 CUDA_HOME=$CONDA_PREFIX TORCH_CUDA_ARCH_LIST="10.0" \
+    pip install -e . && cd ..
+
+# 2) mmdet 2.14.0 + raise its mmcv cap so 1.7.1 is accepted:
+pip install mmdet==2.14.0
+sed -i -E "s/mmcv_maximum_version = '[0-9.]+'/mmcv_maximum_version = '1.99.0'/" \
+    "$(python -c 'import mmdet,os;print(os.path.dirname(mmdet.__file__))')/__init__.py"
+
+# 3) mmdet3d 0.17.1 (stock) + the bundled torch-2.x patch, then build:
+git clone -b v0.17.1 https://github.com/open-mmlab/mmdetection3d.git && cd mmdetection3d
+git apply /path/to/BEVDepth_CARLA/patches/mmdet3d-0.17.1-torch2x.patch
+CUDA_HOME=$CONDA_PREFIX TORCH_CUDA_ARCH_LIST="10.0" pip install -e . && cd ..
+
+# 4) PyTorch-Lightning 1.6.2 (BEVDepth uses the PL-1.x Trainer API).
 #    PL 1.6.2 ships invalid metadata that pip>=24.1 rejects, so pin pip first:
 pip install "pip<24.1"
 pip install --no-deps pytorch_lightning==1.6.2 torchmetrics==0.7.2 \
             tensorboardX pyDeprecate==0.3.2
 pip install numba nuscenes-devkit wandb
 
-# 2) compile the voxel-pooling CUDA ops. CUDA_HOME MUST point at the CUDA that
-#    your torch was built with (else nvcc/torch version mismatch). On B200:
+# 5) compile this repo's voxel-pooling CUDA ops (CUDA_HOME = your torch's CUDA):
 CUDA_HOME=$CONDA_PREFIX TORCH_CUDA_ARCH_LIST="10.0" \
     python setup.py develop          # or: build_ext --inplace
 ```
