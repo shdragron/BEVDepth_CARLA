@@ -235,7 +235,8 @@ class NuscDetDataset(Dataset):
                  sweep_idxes=list(),
                  key_idxes=list(),
                  use_fusion=False,
-                 gt_visibility_min=None):
+                 gt_visibility_min=None,
+                 extrin_noise_conf=None):
         """Dataset used for bevdetection task.
         Args:
             ida_aug_conf (dict): Config for ida augmentation.
@@ -289,6 +290,31 @@ class NuscDetDataset(Dataset):
         # GT boxes whose visibility_token >= this value (CARLA uses 2). The base
         # class ignores it and uses the num_lidar_pts + num_radar_pts > 0 filter.
         self.gt_visibility_min = gt_visibility_min
+        # Train-time EXTRINSIC-rotation augmentation ("calibration noise"): when
+        # set to dict(p=.., rot_deg=..), with prob p PER SAMPLE each camera's
+        # cam->ego extrinsic E is left-multiplied by a random rotation delta
+        # (Euler xyz each ~ U(-rot_deg, +rot_deg), translation 0) -> E' = delta@E.
+        # Only the sensor2ego mat used by the LSS lift is perturbed; the IMAGE,
+        # the GT boxes (ego frame), the intrinsics and the lidar DEPTH GT (which
+        # projects with the clean cam_info) all stay clean -> the model learns to
+        # tolerate a mis-calibrated extrinsic (the VP EXT/ER condition). Train-only
+        # (val/predict pass extrin_noise_conf=None).
+        self.extrin_noise_conf = extrin_noise_conf
+
+    def _sample_extrin_delta(self):
+        """A 4x4 rotation-only homogeneous transform from Euler xyz angles each
+        drawn ~ U(-rot_deg, +rot_deg) deg (translation 0). Used to left-multiply a
+        camera's cam->ego extrinsic for the extrinsic-noise augmentation."""
+        deg = self.extrin_noise_conf['rot_deg']
+        ax, ay, az = np.deg2rad(np.random.uniform(-deg, deg, size=3))
+        cx, cy, cz = np.cos([ax, ay, az])
+        sx, sy, sz = np.sin([ax, ay, az])
+        rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+        ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+        rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+        delta = torch.eye(4)
+        delta[:3, :3] = torch.from_numpy((rz @ ry @ rx).astype(np.float32))
+        return delta
 
     def _load_lidar_points(self, full_path):
         """Load lidar points as an (N, 4) xyz+intensity array.
@@ -429,6 +455,10 @@ class NuscDetDataset(Dataset):
             dict: meta infos needed for evaluation.
         """
         assert len(cam_infos) > 0
+        # Extrinsic-noise aug: decide ONCE per sample whether to perturb (Bernoulli
+        # p); each camera then gets an independent rotation delta below.
+        apply_extrin = (self.is_train and self.extrin_noise_conf is not None
+                        and np.random.rand() < self.extrin_noise_conf['p'])
         sweep_imgs = list()
         sweep_sensor2ego_mats = list()
         sweep_intrin_mats = list()
@@ -452,6 +482,9 @@ class NuscDetDataset(Dataset):
             timestamps = list()
             lidar_depth = list()
             key_info = cam_infos[0]
+            # one extrinsic-noise delta per camera (shared across its sweeps),
+            # applied to the cam->ego mat below; None when this sample is clean.
+            extrin_delta = self._sample_extrin_delta() if apply_extrin else None
             resize, resize_dims, crop, flip, \
                 rotate_ida = self.sample_ida_augmentation(
                     )
@@ -510,6 +543,11 @@ class NuscDetDataset(Dataset):
                     @ sweepsensor2sweepego).inverse()
                 sweepsensor2keyego = global2keyego @ sweepego2global @\
                     sweepsensor2sweepego
+                # extrinsic-noise aug: E' = delta @ E (cam->ego), per-camera. Only
+                # this lift extrinsic is perturbed; depth GT / intrinsics / image
+                # / GT boxes stay clean (calibration-noise aug).
+                if extrin_delta is not None:
+                    sweepsensor2keyego = extrin_delta @ sweepsensor2keyego
                 sensor2ego_mats.append(sweepsensor2keyego)
                 sensor2sensor_mats.append(keysensor2sweepsensor)
                 intrin_mat = torch.zeros((4, 4))

@@ -430,7 +430,9 @@ class BEVDepthLightningModel(LightningModule):
                                        key_idxes=self.key_idxes,
                                        return_depth=self.data_return_depth,
                                        use_fusion=self.use_fusion,
-                                       gt_visibility_min=self.gt_visibility_min)
+                                       gt_visibility_min=self.gt_visibility_min,
+                                       extrin_noise_conf=getattr(
+                                           self, 'extrin_noise_conf', None))
 
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
