@@ -5,12 +5,15 @@ Identical recipe to ``carla_sedan`` (128x128 BEV, EMA off, CBGS off, single-fram
 fp32/TF32-off, 24 ep, lr 2e-4, all IDA/BDA aug off) so it is a controlled A/B vs
 the no-aug sedan — the ONLY difference is the extrinsic-noise augmentation:
 
-  with prob 0.5 per sample, each camera's cam->ego extrinsic is left-multiplied by
-  a random rotation (Euler xyz each ~ U(-20, +20) deg, translation 0). The image,
-  GT boxes, intrinsics and lidar DEPTH GT all stay clean (calibration-noise aug) ->
-  the lift sees a mis-calibrated pose, so the model learns to tolerate the VP
-  EXT/ER condition. (Mirrors the `extrin_uniform20_p05.yaml` setup used for the
-  other models.)
+  with prob 0.5 per sample, each camera's cam->ego extrinsic E is RIGHT-multiplied
+  by a random rotation: E' = E @ delta (Euler xyz each ~ U(-20, +20) deg, trans 0),
+  i.e. the camera is rotated about its OWN optical center (pan/tilt/roll in place),
+  matching how the carla_VR viewpoint variants -- the VP EXT/ER test -- perturb the
+  extrinsic (variant = baseline @ delta_cam, position fixed). The image, GT boxes,
+  intrinsics and lidar DEPTH GT all stay clean (calibration-noise aug) -> the lift
+  sees a mis-calibrated pose, so the model learns to tolerate the VP EXT condition.
+  (NB: a left-multiply delta@E would orbit the camera around the ego origin -- a
+  DIFFERENT perturbation that the EXT test does not measure, so it gave no EXT gain.)
 
 Run (same as carla_sedan):
   python bevdepth/exps/nuscenes/carla/carla_sedan_extrinaug.py \

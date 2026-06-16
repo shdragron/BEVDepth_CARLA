@@ -543,11 +543,17 @@ class NuscDetDataset(Dataset):
                     @ sweepsensor2sweepego).inverse()
                 sweepsensor2keyego = global2keyego @ sweepego2global @\
                     sweepsensor2sweepego
-                # extrinsic-noise aug: E' = delta @ E (cam->ego), per-camera. Only
-                # this lift extrinsic is perturbed; depth GT / intrinsics / image
-                # / GT boxes stay clean (calibration-noise aug).
+                # extrinsic-noise aug: E' = E @ delta (RIGHT-multiply, cam frame) --
+                # rotate the camera about its OWN optical center (pan/tilt/roll in
+                # place), matching how the carla_VR viewpoint variants (the VP EXT/ER
+                # test) perturb the extrinsic: variant = baseline @ delta_cam, with
+                # the camera POSITION fixed. (A left-multiply delta@E would instead
+                # orbit the camera around the ego origin -- a different perturbation
+                # that does NOT match the EXT test, so it gives no EXT robustness.)
+                # Only this lift extrinsic is perturbed; depth GT / intrinsics /
+                # image / GT boxes stay clean (calibration-noise aug).
                 if extrin_delta is not None:
-                    sweepsensor2keyego = extrin_delta @ sweepsensor2keyego
+                    sweepsensor2keyego = sweepsensor2keyego @ extrin_delta
                 sensor2ego_mats.append(sweepsensor2keyego)
                 sensor2sensor_mats.append(keysensor2sweepsensor)
                 intrin_mat = torch.zeros((4, 4))
