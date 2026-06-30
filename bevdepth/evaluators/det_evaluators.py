@@ -1,5 +1,6 @@
 '''Modified from # https://github.com/nutonomy/nuscenes-devkit/blob/57889ff20678577025326cfc24e57424a829be0a/python-sdk/nuscenes/eval/detection/evaluate.py#L222 # noqa
 '''
+import os
 import os.path as osp
 import tempfile
 
@@ -341,6 +342,32 @@ class DetNuscEvaluator():
                 print('[CARLA-EVAL] {}-class mAP={:.4f} NDS={:.4f}'.format(
                     len(self.class_names), mapc, nds), flush=True)
                 print('[CARLA-METRICS-JSON] ' + _json.dumps(detail), flush=True)
+
+        # Optional second scoring pass at visibility floor 0 (all boxes), gated by
+        # env so the default vis>=2 behaviour is byte-identical. Re-runs the eval on
+        # the SAME predictions (single inference, dual score) by toggling the module
+        # CARLA_MIN_VISIBILITY that _carla_load_gt reads. The no-vis CTS campaign
+        # sets CARLA_DUAL_VIS=1; a downstream parser scrapes [CARLA-EVAL-VIS0].
+        if detail is not None and os.environ.get('CARLA_DUAL_VIS'):
+            try:
+                import sys as _sys, json as _json
+                _path = (result_files[result_names[-1]]
+                         if isinstance(result_files, dict) else result_files)
+                _mod = _sys.modules[__name__]
+                _prev = _mod.CARLA_MIN_VISIBILITY
+                _mod.CARLA_MIN_VISIBILITY = 0
+                try:
+                    detail0 = self._evaluate_single(_path)
+                finally:
+                    _mod.CARLA_MIN_VISIBILITY = _prev
+                nds0 = next((v for k, v in detail0.items() if k.endswith('/NDS')), None)
+                map0 = next((v for k, v in detail0.items() if k.endswith('/mAP')), None)
+                if nds0 is not None and map0 is not None:
+                    print('[CARLA-EVAL-VIS0] visibility_floor=0 {}-class mAP={:.4f} '
+                          'NDS={:.4f}'.format(len(self.class_names), map0, nds0), flush=True)
+                    print('[CARLA-METRICS-JSON-VIS0] ' + _json.dumps(detail0), flush=True)
+            except Exception as _e:
+                print(f'[CARLA-EVAL-VIS0] FAILED: {_e}', flush=True)
 
         if tmp_dir is not None:
             tmp_dir.cleanup()

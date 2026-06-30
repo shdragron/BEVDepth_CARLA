@@ -220,3 +220,4 @@ events.out.tfevents*
 
 # vim
 .vim
+archive_carla_results/
